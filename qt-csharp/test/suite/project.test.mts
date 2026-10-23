@@ -2,16 +2,22 @@
 // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only
 
 import { expect } from 'chai';
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { promisify } from 'util';
 import * as vscode from 'vscode';
 import {
   collectPreviewStagingGarbage,
   defaultQtRid,
+  evaluateProject,
   inspectQtBridgeProject,
+  parseProjectEvaluation,
   resolveQtBridgeQtDir,
-  QtBridgeProjectSnapshot
+  QtBridgeProjectSnapshot,
+  type EvaluatedProject,
+  type ProjectEvaluator
 } from '@/project.mjs';
 import { QtBridgeProjectManager } from '@/project-manager.mjs';
 import { findDotNetPathEntry, type QtBridgeQmlMetadata } from 'qt-lib';
@@ -33,10 +39,16 @@ describe('Qt Bridge project discovery', () => {
     await fs.promises.rm(testDirectory, { recursive: true, force: true });
   });
 
-  async function inspect(projectXml: string) {
+  // Without an explicit evaluator, no MSBuild process is started.
+  const noEvaluation: ProjectEvaluator = () => Promise.resolve(undefined);
+
+  async function inspect(
+    projectXml: string,
+    evaluate: ProjectEvaluator = noEvaluation
+  ) {
     const projectFile = path.join(testDirectory, 'Application.csproj');
     await fs.promises.writeFile(projectFile, projectXml, 'utf8');
-    return inspectQtBridgeProject(vscode.Uri.file(projectFile));
+    return inspectQtBridgeProject(vscode.Uri.file(projectFile), {}, evaluate);
   }
 
   it('maps macOS architectures to Qt Bridge package RIDs', () => {
@@ -349,6 +361,206 @@ describe('Qt Bridge project discovery', () => {
     expect(project?.packageId).to.equal(
       `QtGroup.Qt.Bridge.CSharp.${defaultQtRid()}`
     );
+  });
+
+  it('resolves the package RID of the current project template', async () => {
+    const project = await inspect(`
+      <Project Sdk="Microsoft.NET.Sdk">
+        <PropertyGroup>
+          <QtBridgeRuntimeId>linux-arm64</QtBridgeRuntimeId>
+        </PropertyGroup>
+        <ItemGroup>
+          <PackageReference Include="$(QtBridgePackageId)" Version="0.5.*" />
+        </ItemGroup>
+      </Project>`);
+
+    expect(project?.packageId).to.equal('QtGroup.Qt.Bridge.CSharp.linux-arm64');
+    expect(project?.packageVersion).to.equal('0.5.*');
+  });
+
+  function recordingEvaluator(result: EvaluatedProject | undefined) {
+    const evaluated: string[] = [];
+    const evaluate: ProjectEvaluator = (projectFile) => {
+      evaluated.push(projectFile);
+      return Promise.resolve(result);
+    };
+    return { evaluate, evaluated };
+  }
+
+  const plainProject = `
+    <Project Sdk="Microsoft.NET.Sdk">
+      <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+    </Project>`;
+
+  it('detects a package reference from Directory.Build.props by evaluation', async () => {
+    await fs.promises.writeFile(
+      path.join(testDirectory, 'Directory.Build.props'),
+      '<Project />',
+      'utf8'
+    );
+    const { evaluate, evaluated } = recordingEvaluator({
+      packageReferences: [
+        { id: 'Some.Other.Package', version: '1.0.0' },
+        { id: 'QtGroup.Qt.Bridge.CSharp.linux-x64', version: '0.5.2' }
+      ],
+      nugetPackageRoot: '/home/user/.nuget/packages/'
+    });
+    const project = await inspect(plainProject, evaluate);
+
+    expect(evaluated).to.have.length(1);
+    expect(project?.packageId).to.equal('QtGroup.Qt.Bridge.CSharp.linux-x64');
+    expect(project?.packageVersion).to.equal('0.5.2');
+    expect(project?.nugetPackageRoot).to.equal('/home/user/.nuget/packages/');
+  });
+
+  it('prefers the evaluated package over the inferred template RID', async () => {
+    const { evaluate } = recordingEvaluator({
+      packageReferences: [
+        { id: 'QtGroup.Qt.Bridge.CSharp.win-arm64', version: '0.5.*' }
+      ],
+      nugetPackageRoot: undefined
+    });
+    const project = await inspect(
+      `
+      <Project Sdk="Microsoft.NET.Sdk">
+        <PropertyGroup><QtBridgeRuntimeId>linux-x64</QtBridgeRuntimeId></PropertyGroup>
+        <ItemGroup>
+          <PackageReference Include="$(QtBridgePackageId)" Version="0.5.*" />
+        </ItemGroup>
+      </Project>`,
+      evaluate
+    );
+
+    expect(project?.packageId).to.equal('QtGroup.Qt.Bridge.CSharp.win-arm64');
+    expect(project?.packageVersion).to.equal('0.5.*');
+  });
+
+  it('falls back to the inferred template RID without an evaluation', async () => {
+    const project = await inspect(`
+      <Project Sdk="Microsoft.NET.Sdk">
+        <PropertyGroup><QtBridgeRuntimeId>linux-x64</QtBridgeRuntimeId></PropertyGroup>
+        <ItemGroup>
+          <PackageReference Include="$(QtBridgePackageId)" Version="0.5.*" />
+        </ItemGroup>
+      </Project>`);
+
+    expect(project?.packageId).to.equal('QtGroup.Qt.Bridge.CSharp.linux-x64');
+  });
+
+  it('does not evaluate a project with a literal package reference', async () => {
+    const { evaluate, evaluated } = recordingEvaluator(undefined);
+    const project = await inspect(
+      `
+      <Project Sdk="Microsoft.NET.Sdk">
+        <ItemGroup>
+          <PackageReference Include="QtGroup.Qt.Bridge.CSharp.win-x64" Version="0.5.0" />
+        </ItemGroup>
+      </Project>`,
+      evaluate
+    );
+
+    expect(project?.packageId).to.equal('QtGroup.Qt.Bridge.CSharp.win-x64');
+    expect(evaluated).to.be.empty;
+  });
+
+  it('does not evaluate a project that MSBuild cannot extend', async () => {
+    const { evaluate, evaluated } = recordingEvaluator({
+      packageReferences: [
+        { id: 'QtGroup.Qt.Bridge.CSharp.linux-x64', version: '0.5.0' }
+      ],
+      nugetPackageRoot: undefined
+    });
+    const project = await inspect(plainProject, evaluate);
+
+    expect(project).to.be.undefined;
+    expect(evaluated).to.be.empty;
+  });
+
+  it('ignores the templates package in the evaluation', async () => {
+    await fs.promises.writeFile(
+      path.join(testDirectory, 'Directory.Packages.props'),
+      '<Project />',
+      'utf8'
+    );
+    const { evaluate } = recordingEvaluator({
+      packageReferences: [
+        { id: 'QtGroup.Qt.Bridge.CSharp.Templates', version: '0.5.0' }
+      ],
+      nugetPackageRoot: undefined
+    });
+    const project = await inspect(plainProject, evaluate);
+
+    expect(project).to.be.undefined;
+  });
+
+  it('parses package versions from central package management', () => {
+    const evaluation = parseProjectEvaluation(
+      JSON.stringify({
+        Properties: { NuGetPackageRoot: '' },
+        Items: {
+          PackageReference: [
+            { Identity: 'QtGroup.Qt.Bridge.CSharp.linux-x64', Version: '' },
+            { Identity: 'Overridden', Version: '', VersionOverride: '2.0.0' },
+            { Identity: 'Inline', Version: '3.0.0' }
+          ],
+          PackageVersion: [
+            {
+              Identity: 'qtgroup.qt.bridge.csharp.linux-x64',
+              Version: '0.5.1'
+            },
+            { Identity: 'Overridden', Version: '1.0.0' }
+          ]
+        }
+      })
+    );
+
+    expect(evaluation.nugetPackageRoot).to.be.undefined;
+    expect(evaluation.packageReferences).to.deep.equal([
+      { id: 'QtGroup.Qt.Bridge.CSharp.linux-x64', version: '0.5.1' },
+      { id: 'Overridden', version: '2.0.0' },
+      { id: 'Inline', version: '3.0.0' }
+    ]);
+  });
+
+  it('evaluates a package ID from a property with MSBuild', async function () {
+    this.timeout(60000);
+    // Evaluation only, the package does not need to exist.
+    const projectFile = path.join(testDirectory, 'Application.csproj');
+    await fs.promises.writeFile(
+      projectFile,
+      `
+      <Project Sdk="Microsoft.NET.Sdk">
+        <PropertyGroup>
+          <TargetFramework>net8.0</TargetFramework>
+          <MyProperty>QtGroup.Qt.Bridge.CSharp.linux-x64</MyProperty>
+        </PropertyGroup>
+        <ItemGroup>
+          <PackageReference Include="$(MyProperty)" Version="0.5.*" />
+        </ItemGroup>
+      </Project>`,
+      'utf8'
+    );
+
+    const dotNetName = process.platform === 'win32' ? 'dotnet.exe' : 'dotnet';
+    const dotNetDirectory = findDotNetPathEntry();
+    try {
+      await promisify(execFile)(
+        dotNetDirectory ? path.join(dotNetDirectory, dotNetName) : dotNetName,
+        ['--version'],
+        { env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } }
+      );
+    } catch {
+      // No .NET SDK on this machine.
+      this.skip();
+    }
+
+    const evaluation = await evaluateProject(projectFile);
+    expect(evaluation).to.not.be.undefined;
+    expect(evaluation?.packageReferences).to.deep.include({
+      id: 'QtGroup.Qt.Bridge.CSharp.linux-x64',
+      version: '0.5.*'
+    });
+    expect(fs.existsSync(path.join(testDirectory, 'obj'))).to.be.false;
   });
 
   it('detects imported Qt Bridge targets', async () => {
