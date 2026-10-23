@@ -6,7 +6,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { XMLParser } from 'fast-xml-parser';
+import { execFile } from 'child_process';
 import { createHash } from 'crypto';
+import { promisify } from 'util';
 import { applyBetaAppHostWorkaround } from './beta-apphost-workaround.mjs';
 import {
   createLogger,
@@ -24,7 +26,17 @@ const PREVIEW_STAGING_OWNER_FILE_NAME = '.qt-qml-preview-owner.json';
 const DEFAULT_PREVIEW_STAGING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const KNOWN_QT_BRIDGE_PACKAGE_PREFIX = 'QtGroup.Qt.Bridge.CSharp';
+const QT_BRIDGE_TEMPLATES_PACKAGE_ID = `${KNOWN_QT_BRIDGE_PACKAGE_PREFIX}.Templates`;
 const TEMPLATED_QT_BRIDGE_PACKAGE_ID = '$(QtBridgePackageId)';
+
+// Files MSBuild imports implicitly from the directories above a project.
+export const IMPLICITLY_IMPORTED_FILES = [
+  'Directory.Build.props',
+  'Directory.Build.targets',
+  'Directory.Packages.props'
+] as const;
+
+const PROJECT_EVALUATION_TIMEOUT_MS = 30000;
 
 const KNOWN_IMPORTED_FILES = [
   'QtGroup.Qt.Bridge.CSharp.props',
@@ -46,6 +58,8 @@ export interface QtBridgeProjectInfo {
   readonly qtDir: string | undefined;
   readonly qtDirSource?: QtBridgeQtDirSource;
   readonly hasBundledQt?: boolean;
+  // NuGet package root of the project, known once the project is restored.
+  readonly nugetPackageRoot?: string;
 }
 
 // Where the Qt directory of a project comes from. Only 'project' and
@@ -308,9 +322,148 @@ function getPackageReferenceVersion(
 }
 
 function isKnownQtBridgePackageId(packageId: string): boolean {
-  return packageId
-    .toLowerCase()
-    .startsWith(`${KNOWN_QT_BRIDGE_PACKAGE_PREFIX.toLowerCase()}.`);
+  const lowerCaseId = packageId.toLowerCase();
+  return (
+    lowerCaseId.startsWith(
+      `${KNOWN_QT_BRIDGE_PACKAGE_PREFIX.toLowerCase()}.`
+    ) && lowerCaseId !== QT_BRIDGE_TEMPLATES_PACKAGE_ID.toLowerCase()
+  );
+}
+
+export interface EvaluatedPackageReference {
+  readonly id: string;
+  readonly version: string | undefined;
+}
+
+export interface EvaluatedProject {
+  readonly packageReferences: readonly EvaluatedPackageReference[];
+  readonly nugetPackageRoot: string | undefined;
+}
+
+export type ProjectEvaluator = (
+  projectFile: string
+) => Promise<EvaluatedProject | undefined>;
+
+interface MsBuildEvaluationOutput {
+  readonly Properties?: Record<string, string | undefined>;
+  readonly Items?: Record<
+    string,
+    readonly Record<string, string | undefined>[] | undefined
+  >;
+}
+
+function nonEmpty(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Parses the JSON output of `dotnet msbuild -getItem:PackageReference,
+ * PackageVersion -getProperty:NuGetPackageRoot`.
+ */
+export function parseProjectEvaluation(output: string): EvaluatedProject {
+  const result = JSON.parse(output) as MsBuildEvaluationOutput;
+  // With central package management, the version is on a PackageVersion item.
+  const centralVersions = new Map<string, string>();
+  for (const item of result.Items?.PackageVersion ?? []) {
+    const id = nonEmpty(item.Identity);
+    const version = nonEmpty(item.Version);
+    if (id && version) {
+      centralVersions.set(id.toLowerCase(), version);
+    }
+  }
+
+  const packageReferences: EvaluatedPackageReference[] = [];
+  for (const item of result.Items?.PackageReference ?? []) {
+    const id = nonEmpty(item.Identity);
+    if (!id) {
+      continue;
+    }
+    packageReferences.push({
+      id,
+      version:
+        nonEmpty(item.VersionOverride) ??
+        nonEmpty(item.Version) ??
+        centralVersions.get(id.toLowerCase())
+    });
+  }
+  return {
+    packageReferences,
+    nugetPackageRoot: nonEmpty(result.Properties?.NuGetPackageRoot)
+  };
+}
+
+/**
+ * Evaluates the package references of the project with MSBuild. Unlike the
+ * project file analysis, this sees references from Directory.Build.props and
+ * other imports, from a GlobalPackageReference, and IDs built from
+ * properties. It only evaluates, it neither restores nor builds the project.
+ */
+export async function evaluateProject(
+  projectFile: string
+): Promise<EvaluatedProject | undefined> {
+  const dotNetName = process.platform === 'win32' ? 'dotnet.exe' : 'dotnet';
+  const dotNetDirectory = findDotNetPathEntry();
+  const dotNet = dotNetDirectory
+    ? path.join(dotNetDirectory, dotNetName)
+    : dotNetName;
+  try {
+    const { stdout } = await promisify(execFile)(
+      dotNet,
+      [
+        'msbuild',
+        projectFile,
+        '-nologo',
+        '-getItem:PackageReference,PackageVersion',
+        '-getProperty:NuGetPackageRoot'
+      ],
+      {
+        cwd: path.dirname(projectFile),
+        timeout: PROJECT_EVALUATION_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+        windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }
+      }
+    );
+    return parseProjectEvaluation(stdout);
+  } catch (error) {
+    logger.info(
+      `MSBuild evaluation failed for ${projectFile}: ${String(error)}`
+    );
+    return undefined;
+  }
+}
+
+function hasImplicitlyImportedFile(projectFile: string): boolean {
+  let directory = path.dirname(path.resolve(projectFile));
+  for (;;) {
+    for (const name of IMPLICITLY_IMPORTED_FILES) {
+      if (fs.existsSync(path.join(directory, name))) {
+        return true;
+      }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) {
+      return false;
+    }
+    directory = parent;
+  }
+}
+
+/**
+ * Whether evaluating the project can find package references that the
+ * project file analysis does not see.
+ */
+function mayHaveIndirectPackageReference(
+  projectFile: string,
+  packageReferences: readonly PackageReference[],
+  importedFiles: readonly string[]
+): boolean {
+  return (
+    packageReferences.some(({ include }) => /[$@%]\(/.test(include)) ||
+    importedFiles.length > 0 ||
+    hasImplicitlyImportedFile(projectFile)
+  );
 }
 
 function isKnownImportedFile(importProject: string): boolean {
@@ -362,6 +515,10 @@ function inferQtBridgePackageId(
   }
 
   const configuredRid =
+    resolvePropertyExpression(
+      getMsBuildProperty(properties, 'QtBridgeRuntimeId'),
+      properties
+    ) ??
     resolvePropertyExpression(
       getMsBuildProperty(properties, 'QtBridgeTemplateRid'),
       properties
@@ -460,14 +617,17 @@ function findNuGetPackageVersionDirectory(
 
 function findBundledWindowsQtDir(
   packageId: string | undefined,
-  packageVersion: string | undefined
+  packageVersion: string | undefined,
+  nugetPackageRoot?: string
 ): string | undefined {
   if (process.platform !== 'win32' || !packageId?.includes('.win-')) {
     return undefined;
   }
 
   const nugetPackagesRoot =
-    process.env.NUGET_PACKAGES ?? path.join(os.homedir(), '.nuget', 'packages');
+    nugetPackageRoot ??
+    process.env.NUGET_PACKAGES ??
+    path.join(os.homedir(), '.nuget', 'packages');
   const packageRoot = path.join(nugetPackagesRoot, packageId.toLowerCase());
   const packageVersionDirectory = findNuGetPackageVersionDirectory(
     packageRoot,
@@ -483,15 +643,38 @@ function findBundledWindowsQtDir(
     : undefined;
 }
 
-export function inspectQtBridgeProject(
+export async function inspectQtBridgeProject(
   projectFile: vscode.Uri,
-  qtDirFallbacks: QtBridgeQtDirFallbacks = {}
-): QtBridgeProjectInfo | undefined {
+  qtDirFallbacks: QtBridgeQtDirFallbacks = {},
+  evaluate: ProjectEvaluator = evaluateProject
+): Promise<QtBridgeProjectInfo | undefined> {
   try {
     const projectXml = fs.readFileSync(projectFile.fsPath, 'utf8');
     const { properties, packageReferences, importedFiles } =
       parseProject(projectXml);
-    const packageId = inferQtBridgePackageId(packageReferences, properties);
+
+    // A literal package ID in the project file needs no evaluation. Otherwise
+    // evaluate the project, if MSBuild can see more than the project file.
+    // The static inference remains the fallback if the evaluation fails.
+    const literalPackageId = packageReferences
+      .map(({ include }) => include)
+      .find(isKnownQtBridgePackageId);
+    const evaluation =
+      literalPackageId === undefined &&
+      mayHaveIndirectPackageReference(
+        projectFile.fsPath,
+        packageReferences,
+        importedFiles
+      )
+        ? await evaluate(projectFile.fsPath)
+        : undefined;
+    const evaluatedPackage = evaluation?.packageReferences.find(({ id }) =>
+      isKnownQtBridgePackageId(id)
+    );
+    const packageId =
+      literalPackageId ??
+      evaluatedPackage?.id ??
+      inferQtBridgePackageId(packageReferences, properties);
 
     const isQtBridgeProject =
       packageId !== undefined ||
@@ -505,14 +688,17 @@ export function inspectQtBridgeProject(
     }
 
     const projectQtDir = inferProjectQtDir(properties);
-    const packageVersion = packageId
-      ? (getPackageReferenceVersion(
-          packageReferences,
-          TEMPLATED_QT_BRIDGE_PACKAGE_ID,
-          properties
-        ) ??
-        getPackageReferenceVersion(packageReferences, packageId, properties))
-      : undefined;
+    const packageVersion = evaluatedPackage
+      ? evaluatedPackage.version
+      : packageId
+        ? (getPackageReferenceVersion(
+            packageReferences,
+            TEMPLATED_QT_BRIDGE_PACKAGE_ID,
+            properties
+          ) ??
+          getPackageReferenceVersion(packageReferences, packageId, properties))
+        : undefined;
+    const nugetPackageRoot = evaluation?.nugetPackageRoot;
     const { qtDir, source: qtDirSource } = resolveQtBridgeQtDirWithSource(
       projectQtDir,
       qtDirFallbacks
@@ -523,14 +709,18 @@ export function inspectQtBridgeProject(
       packageVersion,
       qtDir,
       ...(qtDirSource ? { qtDirSource } : {}),
+      ...(nugetPackageRoot ? { nugetPackageRoot } : {}),
       // The win-x64 package always bundles Qt, also before it is restored.
       hasBundledQt:
         packageId?.toLowerCase().endsWith('.win-x64') === true ||
-        findBundledWindowsQtDir(packageId, packageVersion) !== undefined
+        findBundledWindowsQtDir(packageId, packageVersion, nugetPackageRoot) !==
+          undefined
     };
     logger.info(
       `Detected Qt Bridge project: ${projectInfo.projectFile}; ` +
-        `package=${projectInfo.packageId ?? '<none>'}; qtDir=${projectInfo.qtDir ?? '<none>'}` +
+        `package=${projectInfo.packageId ?? '<none>'}` +
+        ` (${evaluatedPackage ? 'evaluated' : 'project file'});` +
+        ` qtDir=${projectInfo.qtDir ?? '<none>'}` +
         ` (${qtDirSource ?? 'unset'}); bundledQt=${String(projectInfo.hasBundledQt)}`
     );
     return projectInfo;
@@ -567,7 +757,8 @@ export function resolveQtBridgeQmlImportPath(
   // Linux and macOS rely on an explicit QtDir/QTDIR-selected installation.
   const bundledQtDir = findBundledWindowsQtDir(
     project.packageId,
-    project.packageVersion
+    project.packageVersion,
+    project.nugetPackageRoot
   );
   if (bundledQtDir) {
     const qmlDir = path.join(bundledQtDir, 'qml');

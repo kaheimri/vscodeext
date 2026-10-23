@@ -20,6 +20,7 @@ import {
 } from '@/metadata.mjs';
 import {
   buildFindsQt,
+  IMPLICITLY_IMPORTED_FILES,
   inspectQtBridgeProject,
   QtBridgeProjectSnapshot,
   type QtBridgeProjectInfo,
@@ -31,6 +32,29 @@ import { canonicalPath } from '@/utils.mjs';
 const logger = createLogger('project-manager');
 const PROJECT_EXCLUDE_PATTERN =
   '**/{.git,.vs,bin,obj,node_modules,packages}/**';
+const PROJECT_ASSETS_FILE_NAME = 'project.assets.json';
+// Projects that need an MSBuild evaluation are inspected in parallel, but
+// without starting a process per project at once.
+const MAX_PARALLEL_INSPECTIONS = 4;
+
+async function mapWithLimit<T, R>(
+  values: readonly T[],
+  limit: number,
+  map: (value: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < values.length) {
+      const index = next++;
+      results[index] = await map(values[index] as T);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, values.length) }, worker)
+  );
+  return results;
+}
 
 function isGeneratedProject(uri: vscode.Uri): boolean {
   const segments = canonicalPath(uri.fsPath).split(path.sep);
@@ -282,8 +306,10 @@ export class QtBridgeProjectManager implements vscode.Disposable {
       PROJECT_EXCLUDE_PATTERN
     );
     const qtDirFallbacks = this.getQtDirFallbacks(folder);
-    const inspectedProjects = projectFiles.map((projectFile) =>
-      inspectQtBridgeProject(projectFile, qtDirFallbacks)
+    const inspectedProjects = await mapWithLimit(
+      projectFiles,
+      MAX_PARALLEL_INSPECTIONS,
+      async (projectFile) => inspectQtBridgeProject(projectFile, qtDirFallbacks)
     );
 
     for (const project of previousProjects) {
@@ -534,11 +560,22 @@ export class QtBridgeProjectManager implements vscode.Disposable {
     if (this.folderWatchers.has(folderKey)) {
       return;
     }
+    // Directory.Build.props and the like can add package references to the
+    // evaluated projects. A restore writes the assets file once the package,
+    // and with it the bundled Qt, is available.
     const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(folder, '**/*.csproj')
+      new vscode.RelativePattern(
+        folder,
+        `{**/*.csproj,**/obj/${PROJECT_ASSETS_FILE_NAME},${IMPLICITLY_IMPORTED_FILES.map(
+          (name) => `**/${name}`
+        ).join(',')}}`
+      )
     );
     const scheduleRefresh = (uri: vscode.Uri) => {
-      if (!isGeneratedProject(uri)) {
+      if (
+        path.basename(uri.fsPath) === PROJECT_ASSETS_FILE_NAME ||
+        !isGeneratedProject(uri)
+      ) {
         this.scheduleRefresh(folder);
       }
     };
