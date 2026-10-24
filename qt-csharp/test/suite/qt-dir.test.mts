@@ -7,6 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   buildFindsQt,
+  packageBundlesQt,
   resolveQtBridgeQtDirWithSource,
   type QtBridgeProjectInfo
 } from '@/project.mjs';
@@ -237,6 +238,22 @@ describe('Qt Bridge Qt directory for builds', () => {
         ''
       )
     ).to.deep.equal({ qtDir: installer, source: 'setting' });
+  });
+
+  it('knows which packages bundle Qt before they are restored', () => {
+    const prefix = 'QtGroup.Qt.Bridge.CSharp';
+    expect(packageBundlesQt(`${prefix}.win-x64`, '0.4.*-*')).to.equal(true);
+    expect(packageBundlesQt(`${prefix}.win-arm64`, '0.4.*-*')).to.equal(false);
+    expect(packageBundlesQt(`${prefix}.win-arm64`, '0.4.0.103-beta')).to.equal(
+      false
+    );
+    expect(packageBundlesQt(`${prefix}.win-arm64`, '0.5.*')).to.equal(true);
+    expect(packageBundlesQt(`${prefix}.win-arm64`, '[0.5,)')).to.equal(true);
+    expect(packageBundlesQt(`${prefix}.win-arm64`, '1.0.0')).to.equal(true);
+    expect(packageBundlesQt(`${prefix}.win-arm64`, undefined)).to.equal(true);
+    expect(packageBundlesQt(`${prefix}.linux-x64`, '0.5.*')).to.equal(false);
+    expect(packageBundlesQt(`${prefix}.osx-arm64`, '0.5.*')).to.equal(false);
+    expect(packageBundlesQt(undefined, '0.5.*')).to.equal(false);
   });
 
   it('knows when a build cannot find Qt', () => {
