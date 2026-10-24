@@ -618,6 +618,32 @@ function findNuGetPackageVersionDirectory(
   return versions[0] ? path.join(packageRoot, versions[0]) : undefined;
 }
 
+/**
+ * Whether a Qt Bridge package bundles Qt, which is known before the package is
+ * restored: the win-x64 packages always bundle Qt, and the win-arm64 packages
+ * from version 0.5. An unknown version, for example with Central Package
+ * Management, is taken as a current one.
+ */
+export function packageBundlesQt(
+  packageId: string | undefined,
+  packageVersion: string | undefined
+) {
+  const id = packageId?.toLowerCase();
+  if (id?.endsWith('.win-x64')) {
+    return true;
+  }
+  if (!id?.endsWith('.win-arm64')) {
+    return false;
+  }
+  // The lower bound of a version or version range, such as 0.4.*-*, 0.5.*,
+  // or [0.5,).
+  const match = /^\s*\[?\s*(\d+)\.(\d+)/.exec(packageVersion ?? '');
+  if (!match) {
+    return true;
+  }
+  return Number(match[1]) > 0 || Number(match[2]) >= 5;
+}
+
 function findBundledWindowsQtDir(
   packageId: string | undefined,
   packageVersion: string | undefined,
@@ -713,9 +739,8 @@ export async function inspectQtBridgeProject(
       qtDir,
       ...(qtDirSource ? { qtDirSource } : {}),
       ...(nugetPackageRoot ? { nugetPackageRoot } : {}),
-      // The win-x64 package always bundles Qt, also before it is restored.
       hasBundledQt:
-        packageId?.toLowerCase().endsWith('.win-x64') === true ||
+        packageBundlesQt(packageId, packageVersion) ||
         findBundledWindowsQtDir(packageId, packageVersion, nugetPackageRoot) !==
           undefined
     };
@@ -756,7 +781,7 @@ export function resolveQtBridgeQmlImportPath(
     );
   }
 
-  // Only the Windows runtime package currently bundles a Qt installation.
+  // Only the Windows runtime packages bundle a Qt installation.
   // Linux and macOS rely on an explicit QtDir/QTDIR-selected installation.
   const bundledQtDir = findBundledWindowsQtDir(
     project.packageId,
