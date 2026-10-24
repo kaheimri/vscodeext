@@ -28,19 +28,26 @@ add QML files to an existing project.
 ## Qt installation
 
 Building a Qt Bridge project needs a Qt installation, which is set with
-`QtDir`. Only the Windows x64 package bundles Qt. On Windows ARM64, Linux, and
-macOS, `QtDir` is required.
+`QtDir`. The Windows packages bundle Qt, the Windows ARM64 package from version
+0.5. On Linux and macOS, and with earlier Windows ARM64 packages, `QtDir` is
+required.
 
 If a build would not find Qt, the extension asks you to select one. Run
-`Qt Bridge C#: Select Qt Installation` to select it later. The selection is
-stored in the `qt-csharp.qtDir` setting and exported as `QtDir` to the
-integrated terminal, so builds started there use the same Qt as the QML
+`Qt Bridge C#: Select Qt Installation` to select it later. You can select the
+Qt installation prefix, or the folder that contains `Qt6Config.cmake`, such as
+`/usr/lib/x86_64-linux-gnu/cmake/Qt6` for Qt from Linux distribution packages.
+The prefix is stored in the `qt-csharp.qtDir` setting and exported as `QtDir`
+to the integrated terminal, so builds started there use the same Qt as the QML
 tooling. For builds started elsewhere, for example by C# Dev Kit, set `QtDir`
 in the environment or in the project.
 
+Terminals that are already open keep the previous `QtDir` when you select a
+different Qt, also after `Developer: Reload Window`. Relaunch them, or open new
+ones.
+
 The extension resolves Qt from the project, the `qt-csharp.qtDir` setting, the
 `QtDir` environment variable, or the Qt selected by Qt Core, in that order. The
-Qt bundled by the Windows x64 package is used only as the final fallback.
+Qt bundled by a Windows package is used only as the final fallback.
 
 ## Debug QML code
 

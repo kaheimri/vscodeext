@@ -42,10 +42,10 @@
         \li \l {Register Qt installations}
     \endlist
 
-    On Windows ARM64, Linux, and macOS, you also need to
+    On Linux and macOS, you also need to
     \l {vscodeext-how-to-select-qt-csharp.html}{select the Qt installation}
-    to build with. On Windows x64, the Qt Bridge for C# package brings its own
-    Qt.
+    to build with. On Windows, the Qt Bridge for C# package brings its own
+    Qt, the package for Windows ARM64 from version 0.5.
 
     \section1 Create a Qt Quick C# application project
 
