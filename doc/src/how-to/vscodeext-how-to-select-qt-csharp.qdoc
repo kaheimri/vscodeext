@@ -14,10 +14,11 @@
     finds it in the \c QtDir MSBuild property, which you can also set as an
     environment variable.
 
-    Only the Qt Bridge for C# package for Windows x64 brings its own Qt. On
-    Windows ARM64, Linux, and macOS, you must set \c QtDir to a Qt 6
-    installation that matches the architecture of your computer. On Windows,
-    it must be an MSVC build of Qt.
+    The Qt Bridge for C# packages for Windows bring their own Qt, the package
+    for Windows ARM64 from version 0.5. On Linux and macOS, and with earlier
+    packages for Windows ARM64, you must set \c QtDir to a Qt 6 installation
+    that matches the architecture of your computer. On Windows, it must be an
+    MSVC build of Qt.
 
     \section1 Select Qt in VS Code
 
@@ -38,10 +39,44 @@
             the folder that contains the \c bin and \c lib folders.
     \endlist
 
-    \QVSC stores the selection in the \l {qt-csharp-settings}{Qt Dir}
-    setting. It uses this Qt for the QML language server and QML Preview, and
-    sets it as \c QtDir in new terminals in the \uicontrol Terminal view. Builds
-    that you start there, such as \c {dotnet build}, use the same Qt.
+    For Qt from Linux distribution packages, the installation prefix is
+    usually \c {/usr}. You can also select the folder that contains
+    \c {Qt6Config.cmake}, such as \c {/usr/lib/x86_64-linux-gnu/cmake/Qt6}.
+    \QVSC accepts the same layouts as the build: \c {lib/cmake/Qt6},
+    \c {lib64/cmake/Qt6} as on Fedora and openSUSE, and
+    \c {lib/<multiarch triplet>/cmake/Qt6} as on Debian and Ubuntu.
+
+    \QVSC stores the installation prefix in the
+    \l {qt-csharp-settings}{Qt Dir} setting. It uses this Qt for the QML
+    language server and QML Preview, and sets it as \c QtDir in new terminals
+    in the \uicontrol Terminal view. Builds that you start there, such as
+    \c {dotnet build}, use the same Qt.
+
+    \section1 Use a changed Qt in open terminals
+
+    The \uicontrol {Qt Dir} setting applies to terminals that you open after
+    you change it. Terminals that are already open keep the previous
+    \c QtDir, also the terminals that \uicontrol {Developer: Reload Window}
+    restores. \QVSC tells you about this when you select a different Qt
+    while terminals are open, and VS Code marks such terminals with a warning
+    icon on the terminal tab.
+
+    To use the changed Qt in such a terminal, hover over the icon and select
+    \uicontrol {Relaunch Terminal}, or close the terminal and open a new one.
+    To check the Qt that a terminal uses, run \c {echo $QtDir} on Linux and
+    macOS, or \c {$env:QtDir} in PowerShell.
+
+    To have \uicontrol {Developer: Reload Window} start new terminals, turn
+    off persistent terminal sessions. This also discards the output of the
+    open terminals when you reload the window:
+
+    \code [text]
+    "terminal.integrated.enablePersistentSessions": false
+    \endcode
+
+    \note A \c QtDir that your shell profile sets, for example in
+    \c {~/.bashrc}, overrides the \uicontrol {Qt Dir} setting in terminals,
+    because the shell profile runs after VS Code sets the environment.
 
     \section1 Set QtDir for other builds
 

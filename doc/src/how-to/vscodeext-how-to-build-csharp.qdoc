@@ -42,9 +42,10 @@
     debugger, right-click the project, and select \uicontrol Debug.
 
     C# Dev Kit builds the project outside the \uicontrol Terminal view, so it
-    does not get the \uicontrol {Qt Dir} setting. On Windows ARM64, Linux, and
-    macOS, set the \c QtDir environment variable before you start VS Code, or
-    set \c QtDir in the project.
+    does not get the \uicontrol {Qt Dir} setting. If the Qt Bridge for C#
+    package for your platform does not bring its own Qt, set the \c QtDir
+    environment variable before you start VS Code, or set \c QtDir in the
+    project.
 
     \section1 Debug the application
 
