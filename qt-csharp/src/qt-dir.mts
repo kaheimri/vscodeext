@@ -19,25 +19,117 @@ const logger = createLogger('qt-dir');
 const QT_DIR_SETTING = 'qtDir';
 const QT_DIR_VARIABLE = 'QtDir';
 
+// Debian multiarch triplets, as QtLinuxMultiarch in Qt.Bridge.props.
+const LINUX_MULTIARCH: Partial<Record<string, string>> = {
+  x64: 'x86_64-linux-gnu',
+  arm64: 'aarch64-linux-gnu'
+};
+
+/**
+ * The installation prefix of a Qt installation and its library directory,
+ * which contains cmake/Qt6/Qt6Config.cmake.
+ */
+export interface QtLayout {
+  readonly prefix: string;
+  readonly libDir: string;
+}
+
+/**
+ * Library directories below a Qt prefix that may contain the Qt CMake package,
+ * as QtBridgeResolveQtLayout in Qt.Bridge.targets: lib for the Qt installer,
+ * lib64 for Fedora and openSUSE, and lib/<multiarch triplet> for Debian and
+ * Ubuntu.
+ */
+function qtLibDirNames(platform: NodeJS.Platform, arch: string) {
+  const names = ['lib', 'lib64'];
+  const triplet = platform === 'linux' ? LINUX_MULTIARCH[arch] : undefined;
+  if (triplet) {
+    names.push(path.join('lib', triplet));
+  }
+  return names;
+}
+
+/**
+ * Resolve the layout of a Qt installation from its prefix, or from the
+ * directory that contains Qt6Config.cmake, which users of distribution Qt
+ * often select. Returns undefined if dir is neither.
+ */
+export function resolveQtLayout(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch
+): QtLayout | undefined {
+  const names = qtLibDirNames(platform, arch);
+  for (const name of names) {
+    if (
+      fs.existsSync(path.join(dir, name, 'cmake', 'Qt6', 'Qt6Config.cmake'))
+    ) {
+      return { prefix: dir, libDir: path.join(dir, name) };
+    }
+  }
+  if (!fs.existsSync(path.join(dir, 'Qt6Config.cmake'))) {
+    return undefined;
+  }
+  const cmakeDir = path.resolve(dir);
+  for (const name of names) {
+    // The prefix is above <libdir>/cmake/Qt6.
+    const levels = name.split(path.sep).length + 2;
+    const prefix = path.resolve(cmakeDir, ...Array<string>(levels).fill('..'));
+    if (path.join(prefix, name, 'cmake', 'Qt6') === cmakeDir) {
+      return { prefix, libDir: path.join(prefix, name) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Return the installation prefix of the Qt installation at qtDir, which may
+ * also be the directory that contains Qt6Config.cmake, or qtDir itself if it
+ * is not a Qt installation.
+ */
+export function resolveQtPrefix(qtDir: string) {
+  return resolveQtLayout(qtDir)?.prefix ?? qtDir;
+}
+
+/**
+ * Return the directory with the QML modules of a Qt installation. Distribution
+ * packages keep them below <libdir>/qt6 instead of the prefix.
+ */
+export function findQtQmlDir(qtDir: string) {
+  const layout = resolveQtLayout(qtDir);
+  const candidates = layout
+    ? [path.join(layout.prefix, 'qml'), path.join(layout.libDir, 'qt6', 'qml')]
+    : [path.join(qtDir, 'qml')];
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
 /**
  * Read the architectures a Qt installation was built for, with the same
  * precedence as getArchInfoFromQtInfo: QT_TARGET_ARCH, then QT_ARCHS, which
  * lists all architectures of a multi-architecture build such as the
- * universal macOS packages, then QT_ARCH.
+ * universal macOS packages, then QT_ARCH. Distribution packages keep
+ * qconfig.pri below <libdir>/qt6 instead of the prefix.
  */
-function readQtArchs(qtDir: string): string[] | undefined {
-  let qconfig: string;
-  try {
-    qconfig = fs.readFileSync(
-      path.join(qtDir, 'mkspecs', 'qconfig.pri'),
-      'utf8'
-    );
-  } catch {
+function readQtArchs(layout: QtLayout): string[] | undefined {
+  let qconfig: string | undefined;
+  for (const file of [
+    path.join(layout.prefix, 'mkspecs', 'qconfig.pri'),
+    path.join(layout.libDir, 'qt6', 'mkspecs', 'qconfig.pri')
+  ]) {
+    try {
+      qconfig = fs.readFileSync(file, 'utf8');
+      break;
+    } catch {
+      // Try the next location.
+    }
+  }
+  if (qconfig === undefined) {
     return undefined;
   }
+  const content = qconfig;
   const valueOf = (key: string) => {
     const value = new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`, 'm')
-      .exec(qconfig)?.[1]
+      .exec(content)?.[1]
       ?.trim();
     // Skip values that reference other qmake variables.
     return value && !value.includes('$$') ? value : undefined;
@@ -60,15 +152,17 @@ export function checkQtDirForBuild(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch
 ): string | undefined {
-  if (
-    !fs.existsSync(path.join(qtDir, 'lib', 'cmake', 'Qt6', 'Qt6Config.cmake'))
-  ) {
-    return 'not a Qt 6 installation (lib/cmake/Qt6/Qt6Config.cmake is missing)';
+  const layout = resolveQtLayout(qtDir, platform, arch);
+  if (!layout) {
+    return (
+      'not a Qt 6 installation (Qt6Config.cmake is missing from ' +
+      'lib/cmake/Qt6, lib64/cmake/Qt6, and lib/<multiarch triplet>/cmake/Qt6)'
+    );
   }
-  if (fs.existsSync(path.join(qtDir, 'bin', 'target_qt.conf'))) {
+  if (fs.existsSync(path.join(layout.prefix, 'bin', 'target_qt.conf'))) {
     return 'Qt for a different target platform';
   }
-  const qtArchs = readQtArchs(qtDir);
+  const qtArchs = readQtArchs(layout);
   if (qtArchs && !qtArchs.includes(hostQtArch(arch))) {
     return `Qt for ${qtArchs.join(', ')}, but this machine is ${hostQtArch(arch)}`;
   }
@@ -77,7 +171,7 @@ export function checkQtDirForBuild(
   if (
     platform === 'win32' &&
     !['Qt6Core.lib', 'Qt6Cored.lib'].some((lib) =>
-      fs.existsSync(path.join(qtDir, 'lib', lib))
+      fs.existsSync(path.join(layout.libDir, lib))
     )
   ) {
     return 'not an MSVC build of Qt';
@@ -176,7 +270,7 @@ export async function selectQtDir(
   items.push({
     label: '$(folder-opened) Browse...',
     detail:
-      'Select the Qt installation prefix, the folder that contains bin and lib'
+      'Select the Qt installation prefix, or the folder that contains Qt6Config.cmake'
   });
   const picked = await vscode.window.showQuickPick(items, {
     title: 'Qt Bridge C#: Select the Qt installation to build with',
@@ -195,7 +289,7 @@ export async function selectQtDir(
       canSelectFolders: true,
       canSelectFiles: false,
       canSelectMany: false,
-      title: 'Select the Qt installation prefix'
+      title: 'Select the Qt installation'
     });
     qtDir = folders?.[0]?.fsPath;
     if (!qtDir) {
@@ -208,6 +302,8 @@ export async function selectQtDir(
       );
       return undefined;
     }
+    // Store the prefix, which all Qt Bridge packages accept as QtDir.
+    qtDir = resolveQtPrefix(qtDir);
   }
 
   await vscode.workspace
@@ -252,7 +348,9 @@ export class QtDirTerminalEnvironment implements vscode.Disposable {
       if (!configured) {
         continue;
       }
-      const qtDir = resolveConfiguration(configured);
+      // A Qt CMake package directory is exported as its prefix, which older
+      // Qt Bridge packages require.
+      const qtDir = resolveQtPrefix(resolveConfiguration(configured));
       scoped.description = `QtDir from the ${EXTENSION_ID}.${QT_DIR_SETTING} setting`;
       scoped.replace(QT_DIR_VARIABLE, qtDir);
       logger.info(`Exporting QtDir=${qtDir} to terminals of ${folder.name}`);

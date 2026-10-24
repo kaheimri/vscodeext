@@ -17,6 +17,7 @@ import {
   type QtBridgeProject,
   type QtBridgeQmlMetadata
 } from 'qt-lib';
+import { findQtQmlDir, resolveQtPrefix } from './qt-dir.mjs';
 
 const logger = createLogger('qtbridge-project');
 
@@ -579,7 +580,9 @@ export function resolveQtBridgeQtDirWithSource(
   for (const [value, source] of candidates) {
     const qtDir = normalizeQtDir(value);
     if (qtDir) {
-      return { qtDir, source };
+      // Users of distribution Qt often give the directory that contains
+      // Qt6Config.cmake. The QML tools need the prefix, as the build does.
+      return { qtDir: resolveQtPrefix(qtDir), source };
     }
   }
   return {};
@@ -743,13 +746,13 @@ export function resolveQtBridgeQmlImportPath(
   }
 
   if (project.qtDir) {
-    const qmlDir = path.join(project.qtDir, 'qml');
-    if (fs.existsSync(qmlDir)) {
+    const qmlDir = findQtQmlDir(project.qtDir);
+    if (qmlDir) {
       logger.info(`Using explicit Qt Bridge Qt import root: ${qmlDir}`);
       return qmlDir;
     }
     logger.info(
-      `Configured Qt path does not contain a qml directory: ${qmlDir}`
+      `Configured Qt path does not contain a qml directory: ${project.qtDir}`
     );
   }
 
