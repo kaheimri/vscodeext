@@ -314,6 +314,22 @@ export async function selectQtDir(
 }
 
 /**
+ * VS Code sets the environment only when a terminal starts, so terminals that
+ * are already open keep the previous QtDir. VS Code marks them, but the mark
+ * is easy to miss.
+ */
+function notifyOpenTerminals() {
+  if (vscode.window.terminals.length === 0) {
+    return;
+  }
+  void vscode.window.showInformationMessage(
+    'The Qt installation for Qt Bridge C# applies to new terminals. ' +
+      'Terminals that are already open keep the previous QtDir until you ' +
+      'relaunch them.'
+  );
+}
+
+/**
  * Export the qt-csharp.qtDir setting as QtDir to the integrated terminal, so
  * that builds started there use the same Qt as the extensions.
  */
@@ -328,6 +344,7 @@ export class QtDirTerminalEnvironment implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(`${EXTENSION_ID}.${QT_DIR_SETTING}`)) {
           this.update();
+          notifyOpenTerminals();
         }
       }),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
