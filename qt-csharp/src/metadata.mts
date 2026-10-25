@@ -400,3 +400,33 @@ export async function discoverQtBridgeMetadata(
     isAmbiguous: metadata === undefined && candidates.length > 1
   };
 }
+
+// The build creates the directory of the ready marker only after it wrote the
+// metadata, and on Linux VS Code does not report files in a directory that did
+// not exist when the watcher started. The project directory exists, so markers
+// inside it are watched from there.
+export function getReadyMarkerWatchPatterns(
+  projectFile: vscode.Uri,
+  readyFiles: readonly string[]
+): vscode.RelativePattern[] {
+  const projectDirectory = path.dirname(projectFile.fsPath);
+  const projectPrefix = canonicalPath(projectDirectory) + path.sep;
+  const patterns = new Map<string, vscode.RelativePattern>();
+  for (const readyFile of readyFiles) {
+    const name = path.basename(readyFile);
+    const insideProject =
+      canonicalPath(readyFile).startsWith(projectPrefix) &&
+      !/[*?[\]{}!]/.test(name);
+    const [key, pattern] = insideProject
+      ? [
+          `**/${name}`,
+          new vscode.RelativePattern(projectDirectory, `**/${name}`)
+        ]
+      : [
+          canonicalPath(readyFile),
+          new vscode.RelativePattern(path.dirname(readyFile), name)
+        ];
+    patterns.set(key, pattern);
+  }
+  return [...patterns.values()];
+}
