@@ -16,6 +16,7 @@ import {
   discoverQtBridgeMetadata,
   getPersistedQtBridgeMetadataSelection,
   getQtBridgeMetadataIdentity,
+  getReadyMarkerWatchPatterns,
   persistQtBridgeMetadataSelection
 } from '@/metadata.mjs';
 import {
@@ -503,13 +504,11 @@ export class QtBridgeProjectManager implements vscode.Disposable {
       metadataWatcher.onDidChange(metadataSignal),
       metadataWatcher.onDidDelete(metadataSignal)
     );
-    for (const readyFile of new Set(readyFiles.map(canonicalPath))) {
-      const readyWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(
-          path.dirname(readyFile),
-          path.basename(readyFile)
-        )
-      );
+    for (const pattern of getReadyMarkerWatchPatterns(
+      project.projectFile,
+      readyFiles
+    )) {
+      const readyWatcher = vscode.workspace.createFileSystemWatcher(pattern);
       const readySignal = () => {
         this.scheduleMetadataRefresh(project, 'ready-marker');
       };

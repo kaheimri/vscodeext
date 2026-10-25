@@ -10,6 +10,7 @@ import {
   discoverQtBridgeMetadata,
   getPersistedQtBridgeMetadataSelection,
   getQtBridgeMetadataIdentity,
+  getReadyMarkerWatchPatterns,
   persistQtBridgeMetadataSelection
 } from '@/metadata.mjs';
 
@@ -338,5 +339,52 @@ describe('Qt Bridge build metadata', () => {
     expect(result.metadata?.application).to.be.undefined;
     expect(result.metadata?.qml.files).to.deep.equal([]);
     expect(result.isReady).to.equal(true);
+  });
+
+  describe('ready marker watch patterns', () => {
+    const projectDir = path.join(os.tmpdir(), 'qtbridge-watch', 'App');
+    const projectFile = vscode.Uri.file(path.join(projectDir, 'App.csproj'));
+    const marker = (...segments: string[]) =>
+      path.join(projectDir, 'obj', ...segments, '.qt', 'qtbridge-build.ready');
+
+    it('watches markers inside the project from the project directory', () => {
+      const patterns = getReadyMarkerWatchPatterns(projectFile, [
+        marker('Debug'),
+        marker('Release')
+      ]);
+
+      expect(patterns).to.have.length(1);
+      expect(normalizedPath(patterns[0]?.baseUri.fsPath)).to.equal(
+        normalizedPath(projectDir)
+      );
+      expect(patterns[0]?.pattern).to.equal('**/qtbridge-build.ready');
+    });
+
+    it('watches markers outside the project in their directory', () => {
+      const outside = path.join(
+        os.tmpdir(),
+        'qtbridge-watch',
+        'native',
+        'qtbridge-build.ready'
+      );
+      const patterns = getReadyMarkerWatchPatterns(projectFile, [outside]);
+
+      expect(patterns).to.have.length(1);
+      expect(normalizedPath(patterns[0]?.baseUri.fsPath)).to.equal(
+        normalizedPath(path.dirname(outside))
+      );
+      expect(patterns[0]?.pattern).to.equal('qtbridge-build.ready');
+    });
+
+    it('does not treat a sibling directory with the same prefix as inside', () => {
+      const sibling = path.join(
+        `${projectDir}2`,
+        'obj',
+        'qtbridge-build.ready'
+      );
+      const patterns = getReadyMarkerWatchPatterns(projectFile, [sibling]);
+
+      expect(patterns[0]?.pattern).to.equal('qtbridge-build.ready');
+    });
   });
 });
